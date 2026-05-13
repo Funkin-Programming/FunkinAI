@@ -1,185 +1,220 @@
 package funkinai;
 
 import haxe.Json;
-import haxe.Http;
+import funkinai.FunkinAIConfig;
 
 #if sys
 import sys.thread.Thread;
-import sys.thread.Mutex;
+import sys.thread.Deque;
 #end
+
+private typedef Message =
+{
+	role:String,
+	content:String
+};
+
+private typedef QueueItem =
+{
+	success:Bool,
+	payload:String,
+	attempt:Int
+};
 
 class FunkinAI
 {
-	public typedef Message =
-	{
-		role:String,
-		content:String
-	};
-
 	public var onResponse:String -> Void;
 	public var onError:String -> Void;
-	public var onThinking:Void -> Void; // called when request starts
+	public var onThinking:Void -> Void;
+	public var onRetry:Int -> Void;
 
 	public var history:Array<Message> = [];
-
 	public var isBusy(default, null):Bool = false;
 
 	#if sys
-	var pendingResponse:Null<String> = null;
-	var pendingError:Null<String> = null;
-	var mutex:Mutex;
+	var _queue:Deque<QueueItem>;
 	#end
+
+	var _attempt:Int = 0;
+	var _timeoutTimer:Float = 0;
+	var _lastSendTime:Float = 0;
 
 	public function new()
 	{
 		#if sys
-		mutex = new Mutex();
+		_queue = new Deque<QueueItem>();
 		#end
+		FunkinAIConfig.loadApiKey();
 	}
 
-	public function send(userMessage:String):Void
+	public function send(msg:String):Void
 	{
-		if (isBusy)
-			return;
+		if (isBusy) return;
 
-		userMessage = StringTools.trim(userMessage);
-		if (userMessage.length == 0)
-			return;
+		msg = StringTools.trim(msg);
+		if (msg.length == 0) return;
 
-		history.push({role: "user", content: userMessage});
-		trimHistory();
+		if (haxe.Timer.stamp() - _lastSendTime < FunkinAIConfig.RATE_LIMIT_INTERVAL) return;
 
+		history.push({role: "user", content: msg});
+		_trimHistory();
+
+		_attempt = 0;
 		isBusy = true;
+		_timeoutTimer = 0;
 
-		if (onThinking != null)
-			onThinking();
-
-		#if sys
-		Thread.create(_threadedRequest);
-		#else
-		_request();
-		#end
+		if (onThinking != null) onThinking();
+		_fireRequest();
 	}
 
-	public function update():Void
+	public function update(elapsed:Float):Void
 	{
 		#if sys
-		mutex.acquire();
-		var resp = pendingResponse;
-		var err = pendingError;
-		pendingResponse = null;
-		pendingError = null;
-		mutex.release();
-
-		if (resp != null)
-			_dispatchResponse(resp);
-		else if (err != null)
-			_dispatchError(err);
+		var item = _queue.pop(false);
+		if (item != null)
+		{
+			if (item.success)
+				_succeed(item.payload);
+			else if (item.attempt < FunkinAIConfig.MAX_RETRIES)
+				_scheduleRetry(item.attempt + 1, item.payload);
+			else
+				_fail(item.payload);
+		}
 		#end
+
+		if (isBusy)
+		{
+			_timeoutTimer += elapsed;
+			if (_timeoutTimer >= FunkinAIConfig.REQUEST_TIMEOUT)
+				_fail("Request timed out after " + Std.int(FunkinAIConfig.REQUEST_TIMEOUT) + "s.");
+		}
 	}
 
 	public function reset():Void
 	{
 		history = [];
+		isBusy = false;
+		_attempt = 0;
+		_timeoutTimer = 0;
 	}
 
-	function _request():Void
-	{
-		var messages:Array<Dynamic> = [];
-		for (msg in history)
-			messages.push({role: msg.role, content: msg.content});
-
-		var body:Dynamic = {
-			model: FunkinAIConfig.MODEL,
-			max_tokens: FunkinAIConfig.MAX_TOKENS,
-			system: FunkinAIConfig.SYSTEM_PROMPT,
-			messages: messages
-		};
-
-		var bodyJson = Json.stringify(body);
-
-		var http = new haxe.Http(FunkinAIConfig.API_URL);
-		http.addHeader("x-api-key", FunkinAIConfig.API_KEY);
-		http.addHeader("anthropic-version", FunkinAIConfig.API_VERSION);
-		http.addHeader("content-type", "application/json");
-		http.setPostData(bodyJson);
-
-		http.onData = function(data:String)
-		{
-			try
-			{
-				var parsed = Json.parse(data);
-				var text:String = parsed.content[0].text;
-				text = StringTools.trim(text);
-
-				history.push({role: "assistant", content: text});
-				trimHistory();
-
-				#if sys
-				mutex.acquire();
-				pendingResponse = text;
-				mutex.release();
-				#else
-				_dispatchResponse(text);
-				#end
-			}
-			catch (e:Dynamic)
-			{
-				var errMsg = "Failed to parse API response: " + Std.string(e);
-				#if sys
-				mutex.acquire();
-				pendingError = errMsg;
-				mutex.release();
-				#else
-				_dispatchError(errMsg);
-				#end
-			}
-		};
-
-		http.onError = function(errMsg:String)
-		{
-			#if sys
-			mutex.acquire();
-			pendingError = "API error: " + errMsg;
-			mutex.release();
-			#else
-			_dispatchError("API error: " + errMsg);
-			#end
-		};
-
-		http.request(true); // POST
-	}
-
-	/** Entry point for background thread (sys targets only) */
-	function _threadedRequest():Void
+	function _fireRequest():Void
 	{
 		#if sys
-		_request();
+		Thread.create(_doRequest);
+		#else
+		_doRequest();
 		#end
 	}
 
-	function _dispatchResponse(text:String):Void
+	function _doRequest():Void
 	{
-		isBusy = false;
-		if (onResponse != null)
-			onResponse(text);
+		var msgs:Array<Dynamic> = [for (m in history) {role: m.role, content: m.content}];
+
+		var body = Json.stringify({
+			model:      FunkinAIConfig.MODEL,
+			max_tokens: FunkinAIConfig.MAX_TOKENS,
+			system:     FunkinAIConfig.SYSTEM_PROMPT,
+			messages:   msgs
+		});
+
+		var http = new haxe.Http(FunkinAIConfig.API_URL);
+		http.addHeader("x-api-key",        FunkinAIConfig.API_KEY);
+		http.addHeader("anthropic-version", FunkinAIConfig.API_VERSION);
+		http.addHeader("content-type",      "application/json");
+		http.setPostData(body);
+
+		http.onData = function(raw:String)
+		{
+			try
+			{
+				var parsed:Dynamic = Json.parse(raw);
+				if (parsed.error != null)
+				{
+					_pushResult(false, _parseApiError(parsed.error), _attempt);
+					return;
+				}
+				var text:String = StringTools.trim(cast(parsed.content[0].text, String));
+				_pushResult(true, text, 0);
+			}
+			catch (e:Dynamic)
+			{
+				_pushResult(false, "Parse error: " + Std.string(e), _attempt);
+			}
+		};
+
+		http.onError = function(err:String)
+		{
+			_pushResult(false, err, _attempt);
+		};
+
+		http.request(true);
 	}
 
-	function _dispatchError(msg:String):Void
+	function _pushResult(success:Bool, payload:String, attempt:Int):Void
+	{
+		#if sys
+		_queue.push({success: success, payload: payload, attempt: attempt});
+		#else
+		if (success)
+			_succeed(payload);
+		else if (attempt < FunkinAIConfig.MAX_RETRIES)
+			_scheduleRetry(attempt + 1, payload);
+		else
+			_fail(payload);
+		#end
+	}
+
+	function _scheduleRetry(attempt:Int, lastErr:String):Void
+	{
+		_attempt = attempt;
+		_timeoutTimer = 0;
+		if (onRetry != null) onRetry(attempt);
+
+		#if sys
+		Thread.create(function()
+		{
+			Sys.sleep(FunkinAIConfig.RETRY_DELAY);
+			_fireRequest();
+		});
+		#else
+		_fireRequest();
+		#end
+	}
+
+	function _succeed(text:String):Void
+	{
+		history.push({role: "assistant", content: text});
+		_trimHistory();
+		_lastSendTime = haxe.Timer.stamp();
+		isBusy = false;
+		if (onResponse != null) onResponse(text);
+	}
+
+	function _fail(msg:String):Void
 	{
 		if (history.length > 0 && history[history.length - 1].role == "user")
 			history.pop();
-
 		isBusy = false;
-		if (onError != null)
-			onError(msg);
+		if (onError != null) onError(msg);
 	}
 
-	/** Keep history within the configured limit to avoid huge API payloads */
-	function trimHistory():Void
+	function _parseApiError(err:Dynamic):String
 	{
-		var limit = FunkinAIConfig.MAX_HISTORY_MESSAGES;
-		while (history.length > limit)
+		var type:String = err.type != null ? Std.string(err.type) : "";
+		return switch (type)
+		{
+			case "authentication_error":   "Invalid API key. Set it in funkinai.json.";
+			case "rate_limit_error":       "Rate limit reached. Wait a moment.";
+			case "overloaded_error":       "Claude is overloaded. Try again soon.";
+			case "invalid_request_error":  err.message != null ? Std.string(err.message) : "Invalid request.";
+			default:                       err.message != null ? Std.string(err.message) : "Unknown API error.";
+		}
+	}
+
+	function _trimHistory():Void
+	{
+		while (history.length > FunkinAIConfig.MAX_HISTORY)
 			history.shift();
 	}
 }
