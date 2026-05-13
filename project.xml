@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<project>
+
+	<meta title="FunkinAI" package="com.funkinai.app" version="1.0.0" company="FunkinAI" />
+
+	<app main="Main" path="export" file="FunkinAI" />
+
+	<window width="1280" height="720" fps="60" background="#000000" hardware="true" vsync="false" />
+	<window if="mobile" width="0" height="0" fullscreen="true" />
+	<window if="desktop" resizable="true" />
+
+	<source path="source" />
+
+	<haxelib name="lime"            version="8.3.1" />
+	<haxelib name="openfl"          version="9.4.1" />
+	<haxelib name="flixel"          version="6.1.2" />
+	<haxelib name="flixel-addons"   version="4.0.1" />
+	<haxelib name="flixel-ui"       version="2.6.1" />
+	<haxelib name="hscript"         version="2.5.0" />
+
+	<haxedef name="HXCPP_STACK_TRACE"       if="debug" />
+	<haxedef name="HXCPP_CHECK_POINTER"     if="debug" />
+	<haxedef name="FLX_NO_MOUSE"            if="mobile" />
+	<haxedef name="FLX_NO_KEYBOARD"         if="mobile" />
+	<haxedef name="FLX_NO_TOUCH"            if="desktop" />
+	<haxedef name="FLX_NO_GAMEPAD"          unless="desktop" />
+	<haxedef name="NO_PRELOAD_ALL"          if="mobile" />
+	<haxedef name="lime-forward-cffi"       if="android" />
+	<haxedef name="FUNKINAI_KEY"            value="" />
+
+	<haxeflag name="-dce"     value="full"     unless="debug" />
+	<haxeflag name="--times"                  if="debug" />
+
+	<icon path="art/icon64.png" />
+
+	<android target-sdk-version="34" minimum-sdk-version="21" />
+
+	<architecture name="arm64"  if="android" />
+	<architecture name="armv7"  if="android" />
+	<architecture name="x86_64" if="android" />
+
+	<permission name="android.permission.INTERNET"                   if="android" />
+	<permission name="android.permission.ACCESS_NETWORK_STATE"       if="android" />
+	<permission name="android.permission.READ_EXTERNAL_STORAGE"      if="android" />
+	<permission name="android.permission.WRITE_EXTERNAL_STORAGE"     if="android" />
+	<permission name="android.permission.VIBRATE"                    if="android" />
+
+	<dependency name="openssl" if="android" />
+
+	<certificate path="export/android/keystore.p12" type="pkcs12" password="${KEYSTORE_PASS}" alias="${KEYSTORE_ALIAS}" alias-password="${KEYSTORE_PASS}" if="android" unless="debug" />
+
+	<section if="android">
+		<compilerflag value="-O2" unless="debug" />
+		<compilerflag value="-ffast-math" unless="debug" />
+	</section>
+
+	<section if="ios">
+		<architectures>arm64</architectures>
+	</section>
+
+	<section if="desktop">
+		<compilerflag value="-O2" unless="debug" />
+	</section>
+
+</project>
