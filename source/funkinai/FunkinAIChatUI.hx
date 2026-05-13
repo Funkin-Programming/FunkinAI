@@ -4,407 +4,548 @@ import flixel.FlxG;
 import flixel.FlxSprite;
 import flixel.group.FlxGroup;
 import flixel.text.FlxText;
-import flixel.ui.FlxButton;
 import flixel.util.FlxColor;
 import flixel.tweens.FlxTween;
 import flixel.tweens.FlxEase;
+import openfl.events.TextEvent;
+import openfl.events.KeyboardEvent as OFLKey;
+import openfl.ui.Keyboard;
 import funkinai.FunkinAI;
 import funkinai.FunkinAIConfig;
 
-/**
- * FunkinAI - Chat Overlay UI
- * A HaxeFlixel overlay group that renders the FunkinAI chat window.
- * 
- * Usage in any FlxState:
- *   var chatUI = new FunkinAIChatUI();
- *   add(chatUI);
- * 
- * Then in update():
- *   chatUI.update(elapsed);
- *   (FlxGroup handles this automatically if added to state)
- */
+enum abstract ChatState(Int)
+{
+	var IDLE    = 0;
+	var SENDING = 1;
+	var TYPING  = 2;
+}
+
 class FunkinAIChatUI extends FlxGroup
 {
-	// ─── Layout Constants ────────────────────────────────────────────────────
+	static inline var W:Float       = 500;
+	static inline var H:Float       = 390;
+	static inline var PAD:Float     = 10;
+	static inline var TITLE_H:Float = 32;
+	static inline var STATUS_H:Float = 22;
+	static inline var INPUT_H:Float  = 36;
+	static inline var SB_W:Float     = 6;
+	static inline var SEND_W:Float   = 60;
+	static inline var FONT:Int       = 12;
+	static inline var FONT_T:Int     = 14;
+	static inline var MSG_AREA_Y:Float  = TITLE_H + STATUS_H;
+	static inline var MSG_AREA_H:Float  = H - MSG_AREA_Y - INPUT_H - PAD * 2 - 4;
+	static inline var SLOT_H:Float      = MSG_AREA_H / FunkinAIConfig.MAX_VISIBLE;
 
-	static inline var PANEL_W:Float    = 500;
-	static inline var PANEL_H:Float    = 360;
-	static inline var PADDING:Float    = 12;
-	static inline var INPUT_H:Float    = 36;
-	static inline var MSG_FONT_SIZE:Int = 13;
-	static inline var TITLE_FONT_SIZE:Int = 16;
-	static inline var TOGGLE_KEY = flixel.input.keyboard.FlxKey.TAB;
+	var _ai:FunkinAI;
+	var _state:ChatState = IDLE;
+	var _isVisible:Bool = false;
 
-	// ─── UI Elements ─────────────────────────────────────────────────────────
+	var _panelX:Float;
+	var _panelY:Float;
+	var _dragging:Bool = false;
+	var _dragOX:Float = 0;
+	var _dragOY:Float = 0;
 
-	var panel:FlxSprite;
-	var titleBar:FlxSprite;
-	var titleText:FlxText;
-	var closeBtn:FlxText;
+	var _input:String = "";
+	var _lastInput:String = "";
+	var _cursorTimer:Float = 0;
+	var _cursorOn:Bool = true;
 
-	var messageArea:FlxSprite;
-	var messageTexts:Array<FlxText> = [];
+	var _messages:Array<{role:String, text:String}> = [];
+	var _scrollIdx:Int = 0;
 
-	var inputBox:FlxSprite;
-	var inputText:FlxText;
-	var sendBtn:FlxSprite;
-	var sendBtnLabel:FlxText;
-	var thinkingDots:FlxText;
+	var _typingFull:String = "";
+	var _typingProg:Float = 0;
 
-	var inputBuffer:String = "";
-	var isVisible:Bool = false;
-	var isDragging:Bool = false;
-	var dragOffsetX:Float = 0;
-	var dragOffsetY:Float = 0;
+	var _dotTimer:Float = 0;
+	var _dotIdx:Int = 0;
+	static final DOTS:Array<String> = ["•  ", "•• ", "•••"];
 
-	/** The AI backend */
-	var ai:FunkinAI;
-
-	/** Display messages — {role, text} */
-	var displayMessages:Array<{role:String, text:String}> = [];
-
-	// ─── Constructor ─────────────────────────────────────────────────────────
+	var _panel:FlxSprite;
+	var _titleBar:FlxSprite;
+	var _titleText:FlxText;
+	var _closeBtn:FlxText;
+	var _clearBtn:FlxText;
+	var _statusText:FlxText;
+	var _msgArea:FlxSprite;
+	var _slots:Array<FlxText> = [];
+	var _scrollBg:FlxSprite;
+	var _scrollThumb:FlxSprite;
+	var _inputBg:FlxSprite;
+	var _inputDisplay:FlxText;
+	var _sendBg:FlxSprite;
+	var _sendLabel:FlxText;
 
 	public function new()
 	{
 		super();
 
-		ai = new FunkinAI();
-		ai.onResponse = _onResponse;
-		ai.onError    = _onError;
-		ai.onThinking = _onThinking;
+		_panelX = Math.round((FlxG.width  - W) / 2.0);
+		_panelY = Math.round((FlxG.height - H) / 2.0);
 
-		_buildUI();
-		setVisible(false);
+		_ai = new FunkinAI();
+		_ai.onResponse = _onResponse;
+		_ai.onError    = _onError;
+		_ai.onThinking = _onThinking;
+		_ai.onRetry    = _onRetry;
+
+		_build();
+		_addListeners();
+		_pushSys("FunkinAI ready! Ask me anything about FNF 🎵");
+		_setVisible(false);
 	}
-
-	// ─── Update ──────────────────────────────────────────────────────────────
 
 	override public function update(elapsed:Float):Void
 	{
 		super.update(elapsed);
+		_ai.update(elapsed);
 
-		// Tick the AI (dispatches pending callbacks on sys targets)
-		ai.update();
-
-		// Toggle chat with TAB
 		if (FlxG.keys.justPressed.TAB)
-			setVisible(!isVisible);
+			_setVisible(!_isVisible);
 
-		if (!isVisible)
-			return;
+		if (!_isVisible) return;
 
-		_handleKeyboardInput(elapsed);
-		_handleDragging();
-		_animateThinkingDots(elapsed);
+		_tickCursor(elapsed);
+		_tickTyping(elapsed);
+		_tickDots(elapsed);
+		_handleMouse();
+		_handleDrag();
+		_updateScrollThumb();
 	}
 
-	// ─── Public ──────────────────────────────────────────────────────────────
-
-	public function setVisible(v:Bool):Void
+	override public function destroy():Void
 	{
-		isVisible = v;
-		forEach(function(m) m.visible = v);
+		_removeListeners();
+		super.destroy();
+	}
+
+	function _build():Void
+	{
+		var px = _panelX;
+		var py = _panelY;
+
+		_panel = _spr(px, py, W, H, FunkinAIConfig.C_PANEL);
+		add(_panel);
+
+		_titleBar = _spr(px, py, W, TITLE_H, FunkinAIConfig.C_TITLEBAR);
+		add(_titleBar);
+
+		_titleText = _txt(px + PAD, py + 8, W - 90, "🎵 FunkinAI", FONT_T, FlxColor.WHITE);
+		_titleText.setBorderStyle(SHADOW, FlxColor.fromRGB(0, 0, 0, 100), 1);
+		add(_titleText);
+
+		_clearBtn = _txt(px + W - 72, py + 8, 30, "CLR", FONT - 1, FlxColor.fromRGB(255, 200, 200));
+		add(_clearBtn);
+
+		_closeBtn = _txt(px + W - 28, py + 7, 20, "✕", FONT_T, FlxColor.WHITE);
+		add(_closeBtn);
+
+		_statusText = _txt(px + PAD, py + TITLE_H + 3, W - PAD * 2, "", FONT - 1, FunkinAIConfig.C_STATUS_OK);
+		add(_statusText);
+
+		_msgArea = _spr(px + PAD, py + MSG_AREA_Y, W - PAD * 2 - SB_W - 2, MSG_AREA_H, FunkinAIConfig.C_MSGAREA);
+		add(_msgArea);
+
+		var slotW = W - PAD * 2 - SB_W - 2 - 8;
+		for (i in 0...FunkinAIConfig.MAX_VISIBLE)
+		{
+			var sy = py + MSG_AREA_Y + i * SLOT_H + 4;
+			var t  = _txt(px + PAD + 4, sy, slotW, "", FONT, FlxColor.WHITE);
+			t.wordWrap   = false;
+			t.autoSize   = false;
+			t.fieldHeight = SLOT_H - 2;
+			_slots.push(t);
+			add(t);
+		}
+
+		var sbX = px + W - PAD - SB_W;
+		var sbY = py + MSG_AREA_Y;
+		_scrollBg = _spr(sbX, sbY, SB_W, MSG_AREA_H, FunkinAIConfig.C_SCROLLBG);
+		add(_scrollBg);
+
+		_scrollThumb = _spr(sbX, sbY, SB_W, 20, FunkinAIConfig.C_SCROLLTHUMB);
+		_scrollThumb.visible = false;
+		add(_scrollThumb);
+
+		var inputY = py + H - INPUT_H - PAD;
+		_inputBg = _spr(px + PAD, inputY, W - PAD * 2 - SEND_W - 4, INPUT_H, FunkinAIConfig.C_INPUT);
+		add(_inputBg);
+
+		_inputDisplay = _txt(px + PAD + 6, inputY + 11, W - PAD * 2 - SEND_W - 16, "", FONT, FlxColor.WHITE);
+		add(_inputDisplay);
+
+		_sendBg = _spr(px + W - PAD - SEND_W, inputY, SEND_W, INPUT_H, FunkinAIConfig.C_SEND);
+		add(_sendBg);
+
+		_sendLabel = _txt(px + W - PAD - SEND_W, inputY + 11, SEND_W, "Send", FONT, FlxColor.WHITE);
+		_sendLabel.alignment = CENTER;
+		add(_sendLabel);
+	}
+
+	function _addListeners():Void
+	{
+		FlxG.stage.addEventListener(TextEvent.TEXT_INPUT, _onTextInput);
+		FlxG.stage.addEventListener(OFLKey.KEY_DOWN,      _onStageKey);
+
+		#if mobile
+		lime.app.Application.current.window.textInputEnabled = true;
+		#end
+	}
+
+	function _removeListeners():Void
+	{
+		FlxG.stage.removeEventListener(TextEvent.TEXT_INPUT, _onTextInput);
+		FlxG.stage.removeEventListener(OFLKey.KEY_DOWN,      _onStageKey);
+	}
+
+	function _setVisible(v:Bool):Void
+	{
+		_isVisible = v;
+		forEach(function(m:flixel.FlxBasic) m.visible = v);
 
 		if (v)
 		{
-			// Slide in from right
-			panel.x = FlxG.width;
-			var targetX = (FlxG.width - PANEL_W) / 2;
-			FlxTween.tween(panel, {x: targetX}, 0.25, {ease: FlxEase.expoOut});
-		}
-	}
-
-	// ─── UI Builder ──────────────────────────────────────────────────────────
-
-	function _buildUI():Void
-	{
-		var px = (FlxG.width  - PANEL_W) / 2;
-		var py = (FlxG.height - PANEL_H) / 2;
-
-		// ── Background panel ──────────────────────────────────────────────
-		panel = _makeRect(px, py, PANEL_W, PANEL_H, FlxColor.fromRGB(15, 15, 25, 230));
-		add(panel);
-
-		// ── Title bar ─────────────────────────────────────────────────────
-		titleBar = _makeRect(px, py, PANEL_W, 32, FlxColor.fromRGB(255, 80, 130, 255));
-		add(titleBar);
-
-		titleText = new FlxText(px + PADDING, py + 6, PANEL_W - 60, "🎵 FunkinAI");
-		titleText.setFormat(null, TITLE_FONT_SIZE, FlxColor.WHITE, LEFT);
-		titleText.setBorderStyle(SHADOW, FlxColor.fromRGB(0, 0, 0, 120), 1);
-		add(titleText);
-
-		closeBtn = new FlxText(px + PANEL_W - 36, py + 6, 30, "✕");
-		closeBtn.setFormat(null, TITLE_FONT_SIZE, FlxColor.WHITE, CENTER);
-		add(closeBtn);
-
-		// ── Message area ──────────────────────────────────────────────────
-		var msgAreaY = py + 32 + PADDING;
-		var msgAreaH = PANEL_H - 32 - INPUT_H - PADDING * 3 - 8;
-		messageArea = _makeRect(px + PADDING, msgAreaY, PANEL_W - PADDING * 2, msgAreaH,
-			FlxColor.fromRGB(8, 8, 18, 200));
-		add(messageArea);
-
-		// Pre-create message text slots
-		for (i in 0...FunkinAIConfig.MAX_VISIBLE_MESSAGES)
-		{
-			var mt = new FlxText(px + PADDING + 6, msgAreaY + 6 + i * 38, PANEL_W - PADDING * 2 - 12, "");
-			mt.setFormat(null, MSG_FONT_SIZE, FlxColor.WHITE, LEFT);
-			mt.wordWrap = true;
-			messageTexts.push(mt);
-			add(mt);
-		}
-
-		// ── Input box ─────────────────────────────────────────────────────
-		var inputY = py + PANEL_H - INPUT_H - PADDING;
-		inputBox = _makeRect(px + PADDING, inputY, PANEL_W - PADDING * 2 - 70, INPUT_H,
-			FlxColor.fromRGB(30, 30, 50, 255));
-		add(inputBox);
-
-		inputText = new FlxText(px + PADDING + 6, inputY + 10, PANEL_W - PADDING * 2 - 82, "");
-		inputText.setFormat(null, MSG_FONT_SIZE, FlxColor.fromRGB(220, 220, 255), LEFT);
-		add(inputText);
-
-		// ── Send button ───────────────────────────────────────────────────
-		sendBtn = _makeRect(px + PANEL_W - PADDING - 62, inputY, 62, INPUT_H,
-			FlxColor.fromRGB(255, 80, 130, 255));
-		add(sendBtn);
-
-		sendBtnLabel = new FlxText(px + PANEL_W - PADDING - 62, inputY + 10, 62, "Send");
-		sendBtnLabel.setFormat(null, MSG_FONT_SIZE, FlxColor.WHITE, CENTER);
-		add(sendBtnLabel);
-
-		// ── Thinking dots ─────────────────────────────────────────────────
-		thinkingDots = new FlxText(px + PANEL_W - PADDING - 62, msgAreaY + 6, 60, "");
-		thinkingDots.setFormat(null, 20, FlxColor.fromRGB(255, 80, 130), CENTER);
-		thinkingDots.visible = false;
-		add(thinkingDots);
-
-		// ── Welcome message ───────────────────────────────────────────────
-		_pushMessage("ai", "Yo! I'm FunkinAI 🎵 Ask me anything about FNF!");
-	}
-
-	// ─── Input Handling ──────────────────────────────────────────────────────
-
-	function _handleKeyboardInput(elapsed:Float):Void
-	{
-		// Click on close button
-		if (FlxG.mouse.justPressed)
-		{
-			if (_hitsCloseBtn())
+			var targetX = _panelX;
+			_moveAll(_panelX + W, _panelY);
+			_panel.x = _panelX + W;
+			FlxTween.tween(_panel, {x: targetX}, 0.22, {ease: FlxEase.expoOut, onUpdate: function(_)
 			{
-				setVisible(false);
-				return;
-			}
-			if (_hitsSendBtn() && !ai.isBusy)
-			{
-				_submitInput();
-				return;
-			}
-		}
-
-		if (ai.isBusy)
-			return;
-
-		// Type characters
-		var typed = FlxG.keys.firstJustPressed();
-		if (typed != NONE)
-		{
-			var char = _keyToChar(typed, FlxG.keys.pressed.SHIFT);
-			if (char != null && inputBuffer.length < FunkinAIConfig.MAX_INPUT_LENGTH)
-				inputBuffer += char;
-		}
-
-		// Backspace
-		if (FlxG.keys.justPressed.BACKSPACE && inputBuffer.length > 0)
-			inputBuffer = inputBuffer.substr(0, inputBuffer.length - 1);
-
-		// Enter to send
-		if (FlxG.keys.justPressed.ENTER)
-			_submitInput();
-
-		// Update input display with blinking cursor
-		var cursor = (Math.floor(FlxG.game.ticks / 500) % 2 == 0) ? "|" : "";
-		inputText.text = inputBuffer + cursor;
-	}
-
-	function _handleDragging():Void
-	{
-		// Drag by title bar
-		if (FlxG.mouse.justPressed && _hitsTitleBar())
-		{
-			isDragging = true;
-			dragOffsetX = FlxG.mouse.x - panel.x;
-			dragOffsetY = FlxG.mouse.y - panel.y;
-		}
-
-		if (FlxG.mouse.released)
-			isDragging = false;
-
-		if (isDragging)
-		{
-			var newX = FlxG.mouse.x - dragOffsetX;
-			var newY = FlxG.mouse.y - dragOffsetY;
-			// Clamp to screen
-			newX = Math.max(0, Math.min(FlxG.width  - PANEL_W, newX));
-			newY = Math.max(0, Math.min(FlxG.height - PANEL_H, newY));
-			_movePanel(newX, newY);
+				var dx = _panel.x - (_panelX + W);
+				_panelX = _panel.x;
+				forEach(function(m:flixel.FlxBasic)
+				{
+					var o = cast(m, flixel.FlxObject);
+					if (o != _panel) o.x = _panel.x + (o.x - (_panelX + W));
+				});
+			}});
+			_refreshDisplay();
 		}
 	}
 
-	var _dotTimer:Float = 0;
-	var _dotCount:Int = 0;
-
-	function _animateThinkingDots(elapsed:Float):Void
+	function _tickCursor(elapsed:Float):Void
 	{
-		if (!thinkingDots.visible) return;
+		_cursorTimer += elapsed;
+		if (_cursorTimer >= 0.53)
+		{
+			_cursorTimer = 0;
+			_cursorOn = !_cursorOn;
+			_refreshInput();
+		}
+	}
+
+	function _tickTyping(elapsed:Float):Void
+	{
+		if (_state != TYPING) return;
+
+		_typingProg += FunkinAIConfig.TYPING_CPS * elapsed;
+		var idx = Std.int(Math.min(_typingProg, _typingFull.length));
+
+		if (_messages.length > 0)
+			_messages[_messages.length - 1].text = _typingFull.substr(0, idx);
+
+		_refreshDisplay();
+
+		if (_typingProg >= _typingFull.length)
+		{
+			_messages[_messages.length - 1].text = _typingFull;
+			_state = IDLE;
+			_refreshDisplay();
+			_setStatus("", FunkinAIConfig.C_STATUS_OK);
+		}
+	}
+
+	function _tickDots(elapsed:Float):Void
+	{
+		if (_state != SENDING) return;
 		_dotTimer += elapsed;
-		if (_dotTimer >= 0.4)
+		if (_dotTimer >= 0.38)
 		{
 			_dotTimer = 0;
-			_dotCount = (_dotCount + 1) % 4;
-			var dots = "";
-			for (i in 0..._dotCount) dots += "•";
-			thinkingDots.text = dots;
+			_dotIdx = (_dotIdx + 1) % DOTS.length;
+			_setStatus("Thinking " + DOTS[_dotIdx], FunkinAIConfig.C_STATUS_WAIT);
 		}
 	}
 
-	function _submitInput():Void
+	function _handleMouse():Void
 	{
-		var msg = StringTools.trim(inputBuffer);
-		if (msg.length == 0 || ai.isBusy)
-			return;
+		var wheel = FlxG.mouse.wheel;
+		if (wheel != 0) _scroll(-wheel);
 
-		_pushMessage("user", msg);
-		inputBuffer = "";
-		inputText.text = "";
+		if (!FlxG.mouse.justPressed) return;
 
-		ai.send(msg);
+		if (_hitsBtn(_closeBtn)) { _setVisible(false); return; }
+		if (_hitsBtn(_clearBtn)) { _clearHistory(); return; }
+		if (_hitsSend() && _state == IDLE) { _submit(); return; }
+
+		#if mobile
+		if (_hitsInputArea())
+			lime.app.Application.current.window.textInputEnabled = true;
+		#end
 	}
 
-	// ─── AI Callbacks ────────────────────────────────────────────────────────
+	function _handleDrag():Void
+	{
+		if (FlxG.mouse.justPressed && _hitsTitleBar())
+		{
+			_dragging = true;
+			_dragOX = FlxG.mouse.x - _panelX;
+			_dragOY = FlxG.mouse.y - _panelY;
+		}
+
+		if (FlxG.mouse.released) _dragging = false;
+
+		if (_dragging)
+		{
+			var nx = FlxMath.bound(FlxG.mouse.x - _dragOX, 0, FlxG.width  - W);
+			var ny = FlxMath.bound(FlxG.mouse.y - _dragOY, 0, FlxG.height - H);
+			_moveAll(nx, ny);
+		}
+	}
+
+	function _updateScrollThumb():Void
+	{
+		var total   = _messages.length;
+		var visible = FunkinAIConfig.MAX_VISIBLE;
+
+		if (total <= visible)
+		{
+			_scrollThumb.visible = false;
+			return;
+		}
+
+		_scrollThumb.visible = true;
+		var trackH  = MSG_AREA_H - 4;
+		var thumbH  = Math.max(14, trackH * visible / total);
+		var ratio   = _scrollIdx / (total - visible);
+		var thumbY  = _panelY + MSG_AREA_Y + 2 + ratio * (trackH - thumbH);
+
+		_scrollThumb.y      = thumbY;
+		_scrollThumb.height = thumbH;
+	}
+
+	function _submit():Void
+	{
+		var msg = StringTools.trim(_input);
+		if (msg.length == 0 || _ai.isBusy) return;
+
+		_lastInput = msg;
+		_input     = "";
+		_refreshInput();
+		_pushMsg("user", msg);
+		_ai.send(msg);
+	}
+
+	function _scroll(delta:Int):Void
+	{
+		var max = Std.int(Math.max(0, _messages.length - FunkinAIConfig.MAX_VISIBLE));
+		_scrollIdx = Std.int(Math.max(0, Math.min(_scrollIdx + delta, max)));
+		_refreshDisplay();
+	}
+
+	function _autoScroll():Void
+	{
+		_scrollIdx = Std.int(Math.max(0, _messages.length - FunkinAIConfig.MAX_VISIBLE));
+	}
+
+	function _refreshDisplay():Void
+	{
+		var from = _scrollIdx;
+		for (i in 0...FunkinAIConfig.MAX_VISIBLE)
+		{
+			var mi = from + i;
+			var slot = _slots[i];
+			if (mi < _messages.length)
+			{
+				var msg  = _messages[mi];
+				slot.text  = msg.text;
+				slot.color = switch (msg.role)
+				{
+					case "user":   FlxColor.fromInt(FunkinAIConfig.C_USER);
+					case "system": FlxColor.fromInt(FunkinAIConfig.C_SYSTEM);
+					default:       FlxColor.fromInt(FunkinAIConfig.C_AI);
+				}
+				slot.visible = true;
+			}
+			else
+			{
+				slot.text    = "";
+				slot.visible = false;
+			}
+		}
+	}
+
+	function _refreshInput():Void
+	{
+		if (_input.length == 0 && _state == IDLE)
+		{
+			_inputDisplay.text  = "Ask about FNF...";
+			_inputDisplay.color = FlxColor.fromInt(FunkinAIConfig.C_PLACEHOLDER);
+			return;
+		}
+		var cursor = (_cursorOn && _state == IDLE) ? "|" : "";
+		_inputDisplay.text  = _input + cursor;
+		_inputDisplay.color = FlxColor.WHITE;
+	}
+
+	function _setStatus(msg:String, color:Int):Void
+	{
+		_statusText.text  = msg;
+		_statusText.color = FlxColor.fromInt(color);
+	}
+
+	function _clearHistory():Void
+	{
+		_messages = [];
+		_scrollIdx = 0;
+		_ai.reset();
+		_refreshDisplay();
+		_pushSys("History cleared.");
+	}
+
+	function _pushMsg(role:String, text:String):Void
+	{
+		_messages.push({role: role, text: text});
+		_autoScroll();
+		_refreshDisplay();
+	}
+
+	function _pushSys(text:String):Void
+	{
+		_pushMsg("system", text);
+	}
+
+	function _onTextInput(e:openfl.events.TextEvent):Void
+	{
+		if (!_isVisible || _state != IDLE) return;
+
+		var ch = e.text;
+		if (ch == "\n" || ch == "\r") { _submit(); return; }
+		if (_input.length < FunkinAIConfig.MAX_INPUT_LENGTH)
+		{
+			_input += ch;
+			_cursorOn    = true;
+			_cursorTimer = 0;
+			_refreshInput();
+		}
+	}
+
+	function _onStageKey(e:OFLKey):Void
+	{
+		if (!_isVisible) return;
+
+		switch (e.keyCode)
+		{
+			case Keyboard.BACKSPACE:
+				if (_state == IDLE && _input.length > 0)
+				{
+					_input = _input.substr(0, _input.length - 1);
+					_cursorOn    = true;
+					_cursorTimer = 0;
+					_refreshInput();
+				}
+
+			case Keyboard.ENTER:
+				if (_state == IDLE) _submit();
+
+			case Keyboard.UP:
+				if (_input.length == 0 && _lastInput.length > 0 && _state == IDLE)
+				{
+					_input = _lastInput;
+					_cursorOn    = true;
+					_cursorTimer = 0;
+					_refreshInput();
+				}
+				else _scroll(-1);
+
+			case Keyboard.DOWN:
+				_scroll(1);
+
+			case Keyboard.L:
+				if (e.ctrlKey) _clearHistory();
+		}
+	}
 
 	function _onThinking():Void
 	{
-		thinkingDots.visible = true;
-		thinkingDots.text = "•";
+		_state    = SENDING;
 		_dotTimer = 0;
-		_dotCount = 1;
+		_dotIdx   = 0;
+		_setStatus("Thinking " + DOTS[0], FunkinAIConfig.C_STATUS_WAIT);
+		_sendBg.color = FlxColor.fromInt(FunkinAIConfig.C_SEND_BUSY);
+		_sendLabel.color = FlxColor.fromRGB(200, 150, 170);
 	}
 
 	function _onResponse(text:String):Void
 	{
-		thinkingDots.visible = false;
-		_pushMessage("ai", text);
+		_pushMsg("ai", "");
+
+		_typingFull = text;
+		_typingProg = 0;
+		_state = TYPING;
+
+		_sendBg.color    = FlxColor.fromInt(FunkinAIConfig.C_SEND);
+		_sendLabel.color = FlxColor.WHITE;
 	}
 
-	function _onError(err:String):Void
+	function _onError(msg:String):Void
 	{
-		thinkingDots.visible = false;
-		_pushMessage("ai", "⚠️ Oops! Couldn't reach the API. Check your key.");
-		trace("[FunkinAI] Error: " + err);
+		_state = IDLE;
+		_pushSys("⚠ " + msg);
+		_setStatus("Error — try again.", FunkinAIConfig.C_STATUS_ERR);
+		_sendBg.color    = FlxColor.fromInt(FunkinAIConfig.C_SEND);
+		_sendLabel.color = FlxColor.WHITE;
 	}
 
-	// ─── Message Display ─────────────────────────────────────────────────────
-
-	function _pushMessage(role:String, text:String):Void
+	function _onRetry(attempt:Int):Void
 	{
-		displayMessages.push({role: role, text: text});
-		_refreshMessages();
+		_setStatus("Retrying (" + attempt + "/" + FunkinAIConfig.MAX_RETRIES + ")…", FunkinAIConfig.C_STATUS_WAIT);
 	}
-
-	function _refreshMessages():Void
-	{
-		var visible = displayMessages.slice(-FunkinAIConfig.MAX_VISIBLE_MESSAGES);
-
-		for (i in 0...messageTexts.length)
-		{
-			var mt = messageTexts[i];
-			if (i < visible.length)
-			{
-				var msg = visible[i];
-				var prefix = (msg.role == "user") ? "> " : "AI: ";
-				mt.text  = prefix + msg.text;
-				mt.color = (msg.role == "user")
-					? FlxColor.fromRGB(180, 255, 180)
-					: FlxColor.fromRGB(255, 200, 230);
-				mt.visible = true;
-			}
-			else
-			{
-				mt.text    = "";
-				mt.visible = false;
-			}
-		}
-	}
-
-	// ─── Panel Movement ──────────────────────────────────────────────────────
-
-	function _movePanel(nx:Float, ny:Float):Void
-	{
-		var dx = nx - panel.x;
-		var dy = ny - panel.y;
-		forEach(function(m) { m.x += dx; m.y += dy; });
-	}
-
-	// ─── Hit Tests ───────────────────────────────────────────────────────────
 
 	function _hitsTitleBar():Bool
-		return FlxG.mouse.x >= titleBar.x && FlxG.mouse.x <= titleBar.x + PANEL_W
-			&& FlxG.mouse.y >= titleBar.y && FlxG.mouse.y <= titleBar.y + 32;
+		return _mouseIn(_panelX, _panelY, W, TITLE_H);
 
-	function _hitsCloseBtn():Bool
-		return FlxG.mouse.x >= closeBtn.x && FlxG.mouse.x <= closeBtn.x + 30
-			&& FlxG.mouse.y >= closeBtn.y && FlxG.mouse.y <= closeBtn.y + 24;
+	function _hitsBtn(t:FlxText):Bool
+		return _mouseIn(t.x, t.y, t.width + 8, t.height + 8);
 
-	function _hitsSendBtn():Bool
-		return FlxG.mouse.x >= sendBtn.x && FlxG.mouse.x <= sendBtn.x + 62
-			&& FlxG.mouse.y >= sendBtn.y && FlxG.mouse.y <= sendBtn.y + INPUT_H;
+	function _hitsSend():Bool
+		return _mouseIn(_sendBg.x, _sendBg.y, SEND_W, INPUT_H);
 
-	// ─── Helpers ─────────────────────────────────────────────────────────────
+	function _hitsInputArea():Bool
+		return _mouseIn(_inputBg.x, _inputBg.y, _inputBg.width, INPUT_H);
 
-	function _makeRect(x:Float, y:Float, w:Float, h:Float, color:FlxColor):FlxSprite
+	function _mouseIn(bx:Float, by:Float, bw:Float, bh:Float):Bool
+	{
+		var mx = FlxG.mouse.x;
+		var my = FlxG.mouse.y;
+		return mx >= bx && mx <= bx + bw && my >= by && my <= by + bh;
+	}
+
+	function _moveAll(nx:Float, ny:Float):Void
+	{
+		var dx = nx - _panelX;
+		var dy = ny - _panelY;
+		if (dx == 0 && dy == 0) return;
+		_panelX = nx;
+		_panelY = ny;
+		forEach(function(m:flixel.FlxBasic)
+		{
+			var o = cast(m, flixel.FlxObject);
+			o.x += dx;
+			o.y += dy;
+		});
+	}
+
+	function _spr(x:Float, y:Float, w:Float, h:Float, color:Int):FlxSprite
 	{
 		var s = new FlxSprite(x, y);
-		s.makeGraphic(Std.int(w), Std.int(h), color);
+		s.makeGraphic(Std.int(w), Std.int(h), FlxColor.fromInt(color));
 		return s;
 	}
 
-	/**
-	 * Converts a FlxKey to its character string, respecting Shift.
-	 * Only covers the keys needed for chat input.
-	 */
-	function _keyToChar(key:flixel.input.keyboard.FlxKey, shift:Bool):Null<String>
+	function _txt(x:Float, y:Float, w:Float, text:String, size:Int, color:FlxColor):FlxText
 	{
-		var k = Std.string(key);
-
-		// Letters
-		if (k.length == 1 && k >= "A" && k <= "Z")
-			return shift ? k : k.toLowerCase();
-
-		// Numbers
-		if (!shift) switch (k) {
-			case "ZERO": return "0"; case "ONE": return "1";
-			case "TWO": return "2"; case "THREE": return "3";
-			case "FOUR": return "4"; case "FIVE": return "5";
-			case "SIX": return "6"; case "SEVEN": return "7";
-			case "EIGHT": return "8"; case "NINE": return "9";
-		}
-
-		// Symbols
-		switch (k)
-		{
-			case "SPACE":       return " ";
-			case "PERIOD":      return shift ? ">" : ".";
-			case "COMMA":       return shift ? "<" : ",";
-			case "SLASH":       return shift ? "?" : "/";
-			case "QUOTE":       return shift ? "\"" : "'";
-			case "SEMICOLON":   return shift ? ":" : ";";
-			case "MINUS":       return shift ? "_" : "-";
-			case "PLUS":        return shift ? "+" : "=";
-			case "EXCLAMATION": return "!";
-			default:            return null;
-		}
+		var t = new FlxText(x, y, Std.int(w), text);
+		t.setFormat(null, size, color, LEFT);
+		return t;
 	}
 }
