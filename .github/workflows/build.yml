@@ -1,0 +1,89 @@
+name: Build FunkinAI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-html5:
+    name: HTML5
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: 4.3.7
+
+      - name: Cache haxelib
+        uses: actions/cache@v4
+        with:
+          path: ~/haxelib
+          key: haxelib-html5-${{ hashFiles('**/Project.xml') }}
+          restore-keys: haxelib-html5-
+
+      - name: Install libraries
+        run: |
+          haxelib setup ~/haxelib
+          haxelib install lime          8.3.1  --quiet
+          haxelib install openfl         9.4.1  --quiet
+          haxelib install flixel         6.1.2  --quiet
+          haxelib install flixel-addons  4.0.1  --quiet
+          haxelib install flixel-ui      2.6.1  --quiet
+          haxelib install hscript        2.5.0  --quiet
+          haxelib run lime setup -nocffi
+
+      - name: Write API key config
+        if: ${{ secrets.FUNKINAI_KEY != '' }}
+        run: echo '{"apiKey":"${{ secrets.FUNKINAI_KEY }}"}' > funkinai.json
+
+      - name: Build HTML5
+        run: haxelib run lime build html5 -release -Dfunkinai
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FunkinAI-HTML5
+          path: export/html5/bin/
+          retention-days: 30
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: build-html5
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FunkinAI-HTML5
+          path: dist/
+
+      - name: Zip release
+        run: zip -r FunkinAI-HTML5-${{ github.ref_name }}.zip dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FunkinAI ${{ github.ref_name }}
+          files: FunkinAI-HTML5-${{ github.ref_name }}.zip
+          generate_release_notes: true
+          
