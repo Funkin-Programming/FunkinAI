@@ -39,20 +39,24 @@ jobs:
       - name: Install libraries
         run: |
           haxelib setup ~/haxelib
-          haxelib install lime          8.3.1  --quiet
-          haxelib install openfl         9.4.1  --quiet
-          haxelib install flixel         6.1.2  --quiet
-          haxelib install flixel-addons  4.0.1  --quiet
-          haxelib install flixel-ui      2.6.1  --quiet
-          haxelib install hscript        2.5.0  --quiet
+          haxelib install lime         8.3.1 --quiet
+          haxelib install openfl        9.4.1 --quiet
+          haxelib install flixel        6.1.2 --quiet
+          haxelib install flixel-addons 4.0.1 --quiet
+          haxelib install flixel-ui     2.6.1 --quiet
+          haxelib install hscript       2.5.0 --quiet
           haxelib run lime setup -nocffi
 
       - name: Write API key config
-        if: ${{ secrets.FUNKINAI_KEY != '' }}
-        run: echo '{"apiKey":"${{ secrets.FUNKINAI_KEY }}"}' > funkinai.json
+        env:
+          FUNKINAI_KEY: ${{ secrets.FUNKINAI_KEY }}
+        run: |
+          if [ -n "$FUNKINAI_KEY" ]; then
+            echo "{\"apiKey\":\"$FUNKINAI_KEY\"}" > funkinai.json
+          fi
 
       - name: Build HTML5
-        run: haxelib run lime build html5 -release -Dfunkinai
+        run: haxelib run lime build html5 -release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -86,4 +90,3 @@ jobs:
           name: FunkinAI ${{ github.ref_name }}
           files: FunkinAI-HTML5-${{ github.ref_name }}.zip
           generate_release_notes: true
-          
