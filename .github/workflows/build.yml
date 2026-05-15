@@ -1,4 +1,4 @@
-Name: Build FunkinAI
+name: Build FunkinAI
 
 on:
   push:
@@ -63,7 +63,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FunkinAI-Windows
-          path: export/release/windows/bin/
+          path: export/release/windows/bin
           retention-days: 30
 
   build-android:
@@ -130,7 +130,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: FunkinAI-Android
-          path: export/android/bin/app/build/outputs/apk/release/*.apk
+          path: export/android/bin/app/build/outputs/apk/release/
           retention-days: 30
 
   release:
@@ -147,19 +147,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: FunkinAI-Windows
-          path: dist/windows/
+          path: dist/windows
 
       - name: Download Android artifact
         uses: actions/download-artifact@v4
         with:
           name: FunkinAI-Android
-          path: dist/android/
+          path: dist/android
 
       - name: Zip Windows release
-        run: cd dist/windows && zip -r ../../FunkinAI-Windows-${{ github.ref_name }}.zip .
+        run: |
+          cd dist/windows
+          zip -r ../../FunkinAI-Windows-${{ github.ref_name }}.zip .
 
       - name: Copy Android APK
-        run: cp dist/android/*.apk FunkinAI-Android-${{ github.ref_name }}.apk
+        run: |
+          find dist/android/ -name "*.apk" -exec cp {} ./FunkinAI-Android-${{ github.ref_name }}.apk \;
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
