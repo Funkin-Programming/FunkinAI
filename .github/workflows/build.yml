@@ -1,4 +1,4 @@
-name: Build FunkinAI
+Name: Build FunkinAI
 
 on:
   push:
@@ -13,9 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-html5:
-    name: HTML5
-    runs-on: ubuntu-latest
+  build-windows:
+    name: Windows
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -32,9 +32,71 @@ jobs:
       - name: Cache haxelib
         uses: actions/cache@v4
         with:
+          path: ~\haxelib
+          key: haxelib-windows-${{ hashFiles('**/Project.xml') }}
+          restore-keys: haxelib-windows-
+
+      - name: Install libraries
+        run: |
+          haxelib setup ~\haxelib
+          haxelib install lime         8.3.1 --quiet
+          haxelib install openfl        9.4.1 --quiet
+          haxelib install flixel        6.1.2 --quiet
+          haxelib install flixel-addons 4.0.1 --quiet
+          haxelib install flixel-ui     2.6.1 --quiet
+          haxelib install hscript       2.5.0 --quiet
+          haxelib run lime setup
+
+      - name: Write API key config
+        shell: bash
+        env:
+          FUNKINAI_KEY: ${{ secrets.FUNKINAI_KEY }}
+        run: |
+          if [ -n "$FUNKINAI_KEY" ]; then
+            echo "{\"apiKey\":\"$FUNKINAI_KEY\"}" > funkinai.json
+          fi
+
+      - name: Build Windows
+        run: haxelib run lime build windows -release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FunkinAI-Windows
+          path: export/release/windows/bin/
+          retention-days: 30
+
+  build-android:
+    name: Android
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: 4.3.7
+
+      - name: Cache haxelib
+        uses: actions/cache@v4
+        with:
           path: ~/haxelib
-          key: haxelib-html5-${{ hashFiles('**/Project.xml') }}
-          restore-keys: haxelib-html5-
+          key: haxelib-android-${{ hashFiles('**/Project.xml') }}
+          restore-keys: haxelib-android-
 
       - name: Install libraries
         run: |
@@ -45,7 +107,13 @@ jobs:
           haxelib install flixel-addons 4.0.1 --quiet
           haxelib install flixel-ui     2.6.1 --quiet
           haxelib install hscript       2.5.0 --quiet
-          haxelib run lime setup -nocffi
+          haxelib run lime setup
+
+      - name: Configure Lime Android
+        run: |
+          haxelib run lime config ANDROID_SDK $ANDROID_HOME
+          haxelib run lime config ANDROID_NDK_ROOT $ANDROID_HOME/ndk-bundle
+          haxelib run lime config JAVA_HOME $JAVA_HOME_17_X64
 
       - name: Write API key config
         env:
@@ -55,38 +123,49 @@ jobs:
             echo "{\"apiKey\":\"$FUNKINAI_KEY\"}" > funkinai.json
           fi
 
-      - name: Build HTML5
-        run: haxelib run lime build html5 -release
+      - name: Build Android
+        run: haxelib run lime build android -release
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FunkinAI-HTML5
-          path: export/html5/bin/
+          name: FunkinAI-Android
+          path: export/android/bin/app/build/outputs/apk/release/*.apk
           retention-days: 30
 
   release:
     name: Release
     runs-on: ubuntu-latest
-    needs: build-html5
+    needs: [build-windows, build-android]
     if: startsWith(github.ref, 'refs/tags/v')
 
     permissions:
       contents: write
 
     steps:
-      - name: Download artifact
+      - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
-          name: FunkinAI-HTML5
-          path: dist/
+          name: FunkinAI-Windows
+          path: dist/windows/
 
-      - name: Zip release
-        run: zip -r FunkinAI-HTML5-${{ github.ref_name }}.zip dist/
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: FunkinAI-Android
+          path: dist/android/
+
+      - name: Zip Windows release
+        run: cd dist/windows && zip -r ../../FunkinAI-Windows-${{ github.ref_name }}.zip .
+
+      - name: Copy Android APK
+        run: cp dist/android/*.apk FunkinAI-Android-${{ github.ref_name }}.apk
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: FunkinAI ${{ github.ref_name }}
-          files: FunkinAI-HTML5-${{ github.ref_name }}.zip
+          files: |
+            FunkinAI-Windows-${{ github.ref_name }}.zip
+            FunkinAI-Android-${{ github.ref_name }}.apk
           generate_release_notes: true
